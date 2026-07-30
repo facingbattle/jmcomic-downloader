@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { commands, SearchSort } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
+import DownloadAllSearchButton from '../components/DownloadAllSearchButton.vue'
 import FloatLabelInput from '../components/FloatLabelInput.vue'
 import { PhMagnifyingGlass } from '@phosphor-icons/vue'
 import { SelectProps } from 'naive-ui'
@@ -99,6 +100,14 @@ async function search(keyword: string, page: number, sort: SearchSort) {
         </template>
       </n-button>
     </n-input-group>
+
+    <div v-if="store.searchResult !== undefined" class="flex box-border px-2">
+      <DownloadAllSearchButton
+        class="ml-auto"
+        :keyword="searchInput.trim()"
+        :sort="sortSelected"
+        :page-count="searchPageCount" />
+    </div>
 
     <div v-if="store.searchResult !== undefined" class="flex flex-col gap-row-2 overflow-auto box-border px-2">
       <ComicCard

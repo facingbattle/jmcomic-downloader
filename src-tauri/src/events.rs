@@ -71,6 +71,36 @@ pub enum DownloadAllFavoritesEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 #[serde(tag = "event", content = "data")]
+pub enum DownloadAllSearchEvent {
+    #[serde(rename_all = "camelCase")]
+    GetSearchResultsStart,
+
+    #[serde(rename_all = "camelCase")]
+    Cancelled,
+
+    #[serde(rename_all = "camelCase")]
+    GetComicsProgress { current: i64, total: i64 },
+
+    #[serde(rename_all = "camelCase")]
+    StartCreateDownloadTasks {
+        comic_id: i64,
+        comic_title: String,
+        current: i64,
+        total: i64,
+    },
+
+    #[serde(rename_all = "camelCase")]
+    CreatingDownloadTask { comic_id: i64, current: i64 },
+
+    #[serde(rename_all = "camelCase")]
+    EndCreateDownloadTasks { comic_id: i64 },
+
+    #[serde(rename_all = "camelCase")]
+    GetComicsEnd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(tag = "event", content = "data")]
 pub enum UpdateDownloadedComicsEvent {
     #[serde(rename_all = "camelCase")]
     GetComicStart { total: i64 },

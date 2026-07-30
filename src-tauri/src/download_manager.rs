@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +43,7 @@ pub struct DownloadManager {
     img_sem: Arc<Semaphore>,
     byte_per_sec: Arc<AtomicU64>,
     download_tasks: Arc<RwLock<HashMap<i64, DownloadTask>>>,
+    download_all_search_cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -69,6 +70,7 @@ impl DownloadManager {
             img_sem: Arc::new(Semaphore::new(img_concurrency)),
             byte_per_sec: Arc::new(AtomicU64::new(0)),
             download_tasks: Arc::new(RwLock::new(HashMap::new())),
+            download_all_search_cancelled: Arc::new(AtomicBool::new(false)),
         };
 
         tauri::async_runtime::spawn(manager.clone().emit_download_speed_loop());
@@ -119,6 +121,20 @@ impl DownloadManager {
         };
         task.set_state(DownloadTaskState::Cancelled);
         Ok(())
+    }
+
+    pub fn reset_download_all_search_cancel_flag(&self) {
+        self.download_all_search_cancelled
+            .store(false, Ordering::Relaxed);
+    }
+
+    pub fn cancel_download_all_search(&self) {
+        self.download_all_search_cancelled
+            .store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_download_all_search_cancelled(&self) -> bool {
+        self.download_all_search_cancelled.load(Ordering::Relaxed)
     }
 
     #[allow(clippy::cast_precision_loss)]

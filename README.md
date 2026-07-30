@@ -80,6 +80,8 @@ pnpm install
 #### 3.构建(build)
 
 ```
+$env:Path += ";$env:USERPROFILE\.cargo\bin"; pnpm tauri dev
+
 pnpm tauri build
 ```
 

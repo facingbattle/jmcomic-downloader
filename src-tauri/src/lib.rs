@@ -1,7 +1,7 @@
 use anyhow::Context;
 use events::{
-    DownloadAllFavoritesEvent, DownloadSleepingEvent, DownloadSpeedEvent, DownloadTaskEvent,
-    ExportCbzEvent, ExportPdfEvent, LogEvent, UpdateDownloadedComicsEvent,
+    DownloadAllFavoritesEvent, DownloadAllSearchEvent, DownloadSleepingEvent, DownloadSpeedEvent,
+    DownloadTaskEvent, ExportCbzEvent, ExportPdfEvent, LogEvent, UpdateDownloadedComicsEvent,
 };
 use parking_lot::RwLock;
 use tauri::{Manager, Wry};
@@ -50,6 +50,8 @@ pub fn run() {
             cancel_download_task,
             download_comic,
             download_all_favorites,
+            download_all_search_results,
+            cancel_download_all_search_results,
             update_downloaded_comics,
             show_path_in_file_manager,
             sync_favorite_folder,
@@ -67,6 +69,7 @@ pub fn run() {
             DownloadSleepingEvent,
             DownloadTaskEvent,
             DownloadAllFavoritesEvent,
+            DownloadAllSearchEvent,
             UpdateDownloadedComicsEvent,
             ExportCbzEvent,
             ExportPdfEvent,

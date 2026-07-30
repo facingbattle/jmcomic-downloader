@@ -15,9 +15,9 @@ use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::errors::{CommandError, CommandResult};
-use crate::events::{DownloadAllFavoritesEvent, UpdateDownloadedComicsEvent};
+use crate::events::{DownloadAllFavoritesEvent, DownloadAllSearchEvent, UpdateDownloadedComicsEvent};
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt, WalkDirEntryExt};
-use crate::responses::{GetUserProfileRespData, GetWeeklyInfoRespData};
+use crate::responses::{ComicInSearchRespData, GetUserProfileRespData, GetWeeklyInfoRespData, SearchResp};
 use crate::types::{
     ChapterInfo, Comic, ComicInFavorite, ComicInSearch, ComicInWeekly, FavoriteSort,
     GetFavoriteResult, GetWeeklyResult, SearchResultVariant, SearchSort,
@@ -414,6 +414,178 @@ pub async fn download_all_favorites(app: AppHandle) -> CommandResult<()> {
     // 至此，所有收藏夹漫画的下载任务已经全部创建完毕
     let _ = DownloadAllFavoritesEvent::GetComicsEnd.emit(&app);
 
+    Ok(())
+}
+
+#[allow(clippy::cast_possible_wrap)]
+#[tauri::command(async)]
+#[specta::specta]
+pub async fn download_all_search_results(
+    app: AppHandle,
+    keyword: String,
+    sort: SearchSort,
+    page_limit: Option<i64>,
+) -> CommandResult<()> {
+    let config = app.get_config();
+    let jm_client = app.get_jm_client().inner().clone();
+    let download_manager = app.get_download_manager();
+
+    download_manager.reset_download_all_search_cancel_flag();
+
+    // 发送正在获取搜索结果事件
+    let _ = DownloadAllSearchEvent::GetSearchResultsStart.emit(&app);
+    // 获取搜索结果第一页
+    let first_page_resp = jm_client
+        .search(&keyword, 1, sort.clone())
+        .await
+        .map_err(|err| CommandError::from("获取搜索结果失败", err))?;
+
+    let search_comics: Vec<ComicInSearchRespData> = match first_page_resp {
+        // 关键词直接命中单个漫画(例如输入的是JM号)，视为只有一个搜索结果
+        SearchResp::ComicRespData(comic_resp_data) => vec![ComicInSearchRespData {
+            id: comic_resp_data.id.to_string(),
+            name: comic_resp_data.name.clone(),
+            ..Default::default()
+        }],
+        SearchResp::SearchRespData(first_page) => {
+            let mut search_comics = first_page.content;
+            let page_size = search_comics.len() as i64;
+            if page_size > 0 {
+                let total = first_page.total;
+                let mut page_count = (total + page_size - 1) / page_size;
+                if let Some(page_limit) = page_limit {
+                    if page_limit > 0 {
+                        page_count = page_count.min(page_limit);
+                    }
+                }
+                // 获取搜索结果剩余页
+                let sem = Arc::new(Semaphore::new(5));
+                let mut join_set = JoinSet::new();
+                for page in 2..=page_count {
+                    let jm_client = jm_client.clone();
+                    let sem = sem.clone();
+                    let keyword = keyword.clone();
+                    let sort = sort.clone();
+                    join_set.spawn(async move {
+                        let _permit = sem.acquire().await?;
+                        let resp = jm_client.search(&keyword, page, sort).await?;
+                        Ok::<_, anyhow::Error>(resp)
+                    });
+                }
+                // 等待所有请求完成
+                while let Some(Ok(search_result)) = join_set.join_next().await {
+                    if download_manager.is_download_all_search_cancelled() {
+                        join_set.abort_all();
+                        let _ = DownloadAllSearchEvent::Cancelled.emit(&app);
+                        return Ok(());
+                    }
+                    // 如果有请求失败，直接返回错误
+                    let resp =
+                        search_result.map_err(|err| CommandError::from("获取搜索结果失败", err))?;
+                    if let SearchResp::SearchRespData(page_data) = resp {
+                        search_comics.extend(page_data.content);
+                    }
+                }
+            }
+            search_comics
+        }
+    };
+
+    if download_manager.is_download_all_search_cancelled() {
+        let _ = DownloadAllSearchEvent::Cancelled.emit(&app);
+        return Ok(());
+    }
+    // 至此，搜索结果已经全部获取完毕
+    let total = search_comics.len() as i64;
+
+    let interval_sec = config.read().download_all_search_interval_sec;
+    for (i, search_comic) in search_comics.into_iter().enumerate() {
+        if download_manager.is_download_all_search_cancelled() {
+            let _ = DownloadAllSearchEvent::Cancelled.emit(&app);
+            return Ok(());
+        }
+
+        let comic_title = &search_comic.name;
+        let comic_id = match search_comic
+            .id
+            .parse::<i64>()
+            .context("将id解析为i64失败")
+        {
+            Ok(id) => id,
+            Err(err) => {
+                let err_title = format!("批量下载搜索结果过程中，获取漫画`{comic_title}`失败，已跳过");
+                let string_chain = err.to_string_chain();
+                tracing::error!(err_title, message = string_chain);
+                sleep(Duration::from_secs(interval_sec)).await;
+                continue;
+            }
+        };
+
+        let comic = match utils::get_comic(app.clone(), comic_id).await {
+            Ok(comic) => comic,
+            Err(err) => {
+                let err_title = format!("批量下载搜索结果过程中，获取漫画`{comic_title}`失败，已跳过");
+                let err = err.context("可能是频率太高，请手动去`配置`里调整`下载整个搜索结果时，每处理完一个漫画后休息`");
+                let string_chain = err.to_string_chain();
+                tracing::error!(err_title, message = string_chain);
+                sleep(Duration::from_secs(interval_sec)).await;
+                continue;
+            }
+        };
+
+        let current = (i + 1) as i64;
+        let _ = DownloadAllSearchEvent::GetComicsProgress { current, total }.emit(&app);
+
+        // 给每个漫画未下载的章节创建下载任务
+        let chapter_infos: Vec<&ChapterInfo> = comic
+            .chapter_infos
+            .iter()
+            .filter(|chapter_info| chapter_info.is_downloaded != Some(true))
+            .collect();
+
+        if chapter_infos.is_empty() {
+            sleep(Duration::from_secs(interval_sec)).await;
+            continue;
+        }
+
+        let _ = DownloadAllSearchEvent::StartCreateDownloadTasks {
+            comic_id: comic.id,
+            comic_title: comic.name.clone(),
+            current: 0,
+            total: chapter_infos.len() as i64,
+        }
+        .emit(&app);
+
+        for (current, chapter_info) in chapter_infos.into_iter().enumerate() {
+            let current = current as i64 + 1;
+            let _ = download_manager.create_download_task(comic.clone(), chapter_info.chapter_id);
+
+            let _ = DownloadAllSearchEvent::CreatingDownloadTask {
+                comic_id: comic.id,
+                current,
+            }
+            .emit(&app);
+
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let _ = DownloadAllSearchEvent::EndCreateDownloadTasks { comic_id: comic.id }.emit(&app);
+
+        sleep(Duration::from_secs(interval_sec)).await;
+    }
+    // 至此，所有搜索结果漫画的下载任务已经全部创建完毕
+    let _ = DownloadAllSearchEvent::GetComicsEnd.emit(&app);
+
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::needless_pass_by_value)]
+pub fn cancel_download_all_search_results(app: AppHandle) -> CommandResult<()> {
+    let download_manager = app.get_download_manager();
+    download_manager.cancel_download_all_search();
+    tracing::debug!("取消批量下载搜索结果成功");
     Ok(())
 }
 
